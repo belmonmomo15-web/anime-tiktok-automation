@@ -3,10 +3,24 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
-const { createCanvas } = require("canvas");
+const axios = require("axios");
+const { createCanvas, loadImage } = require("canvas");
+
+// ======================================
+// CONFIGURATION
+// ======================================
 
 const TIMEZONE = process.env.TIMEZONE || "Africa/Douala";
 const OUTPUT_DIR = path.join(__dirname, "output");
+
+const HF_ENABLED =
+  String(process.env.HF_IMAGE_ENABLED || "false").toLowerCase() === "true";
+
+const HF_TOKEN = process.env.HF_TOKEN || "";
+
+const HF_MODEL =
+  process.env.HF_IMAGE_MODEL ||
+  "stabilityai/stable-diffusion-3-medium-diffusers";
 
 const QUOTE_FILES = [
   "quotes_4200_fr_en_no_duplicates.json",
@@ -15,7 +29,7 @@ const QUOTE_FILES = [
 ];
 
 // ======================================
-// 24 STYLES TYPOGRAPHIQUES AUTOMATIQUES
+// 24 STYLES TYPOGRAPHIQUES
 // ======================================
 
 const FONT_STYLES = [
@@ -63,11 +77,12 @@ function loadQuotes() {
   const data = JSON.parse(fs.readFileSync(file, "utf8"));
 
   if (!Array.isArray(data)) {
-    throw new Error("Le fichier des citations doit contenir une liste JSON.");
+    throw new Error("Le fichier JSON doit contenir une liste de citations.");
   }
 
   const quotes = data.filter(
-    item => item &&
+    item =>
+      item &&
       typeof item.quote === "string" &&
       item.quote.trim().length > 0
   );
@@ -83,7 +98,7 @@ function loadQuotes() {
 }
 
 // ======================================
-// CHOIX SANS RÉPÉTITION IMMÉDIATE
+// CHOIX D'UNE CITATION SANS RÉPÉTITION
 // ======================================
 
 function chooseQuote(quotes) {
@@ -99,9 +114,9 @@ function chooseQuote(quotes) {
     item => String(item.id ?? item.quote) !== last
   );
 
-  const item = (options.length ? options : quotes)[
-    Math.floor(Math.random() * (options.length ? options.length : quotes.length))
-  ];
+  const pool = options.length > 0 ? options : quotes;
+
+  const item = pool[Math.floor(Math.random() * pool.length)];
 
   fs.writeFileSync(
     historyPath,
@@ -113,7 +128,7 @@ function chooseQuote(quotes) {
 }
 
 // ======================================
-// CHOIX AUTOMATIQUE DU STYLE
+// CHOIX DU STYLE
 // ======================================
 
 function chooseFontStyle() {
@@ -129,9 +144,9 @@ function chooseFontStyle() {
     style => style.name !== last
   );
 
-  const style = options[
-    Math.floor(Math.random() * options.length)
-  ];
+  const pool = options.length > 0 ? options : FONT_STYLES;
+
+  const style = pool[Math.floor(Math.random() * pool.length)];
 
   fs.writeFileSync(historyPath, style.name, "utf8");
 
@@ -139,7 +154,95 @@ function chooseFontStyle() {
 }
 
 // ======================================
-// RETOUR À LA LIGNE AUTOMATIQUE
+// GÉNÉRATION DU FOND AVEC HUGGING FACE
+// ======================================
+
+async function generateAiBackground(item) {
+  if (!HF_ENABLED) {
+    return null;
+  }
+
+  if (!HF_TOKEN) {
+    console.log("ℹ️ HF_TOKEN absent : fond graphique local utilisé.");
+    return null;
+  }
+
+  const subject = [item.anime, item.character]
+    .filter(Boolean)
+    .join(", ");
+
+  const prompt = [
+    "Vertical 9:16 cinematic anime-inspired illustration.",
+    subject
+      ? "Visual inspiration: " + subject + "."
+      : "Original fantasy anime scenery.",
+    "Beautiful detailed anime art, dramatic cinematic lighting,",
+    "deep blue and violet colors with subtle cyan highlights,",
+    "atmospheric depth, professional digital illustration.",
+    "Keep the center dark and uncluttered for readable quote text.",
+    "No text, no letters, no watermark, no logo."
+  ].join(" ");
+
+  try {
+    console.log("🎨 Demande de génération à Hugging Face...");
+
+    const response = await axios.post(
+      "https://router.huggingface.co/hf-inference/models/" + HF_MODEL,
+      {
+        inputs: prompt,
+        parameters: {
+          width: 768,
+          height: 1360,
+          num_inference_steps: 25
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${HF_TOKEN}`,
+          "Content-Type": "application/json",
+          Accept: "image/png"
+        },
+        responseType: "arraybuffer",
+        timeout: 120000,
+        maxContentLength: 20 * 1024 * 1024
+      }
+    );
+
+    const buffer = Buffer.from(response.data);
+
+    if (buffer.length === 0) {
+      throw new Error("L'image reçue est vide.");
+    }
+
+    const image = await loadImage(buffer);
+
+    console.log("✅ Fond IA reçu.");
+
+    return image;
+
+  } catch (error) {
+    const status = error.response?.status;
+
+    console.error(
+      "⚠️ Génération IA indisponible" +
+      (status ? ` (HTTP ${status})` : "") +
+      ". Le fond graphique local sera utilisé."
+    );
+
+    if (status === 401 || status === 403) {
+      console.error("Vérifie les permissions du token Hugging Face.");
+    } else if (status === 402 || status === 429) {
+      console.error("Vérifie les crédits disponibles et les limites d'utilisation.");
+    } else if (status === 503) {
+      console.error("Le modèle est peut-être en cours de chargement.");
+    }
+
+    return null;
+  }
+}
+
+// ======================================
+// RETOUR À LA LIGNE
 // ======================================
 
 function wrapText(ctx, text, maxWidth) {
@@ -158,13 +261,15 @@ function wrapText(ctx, text, maxWidth) {
     }
   }
 
-  if (line) lines.push(line);
+  if (line) {
+    lines.push(line);
+  }
 
   return lines;
 }
 
 // ======================================
-// CRÉATION DU VISUEL VERTICAL
+// CRÉATION DE L'IMAGE VERTICALE
 // ======================================
 
 async function createImage(item, outputPath, style) {
@@ -174,15 +279,24 @@ async function createImage(item, outputPath, style) {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
 
-  // Arrière-plan dégradé
-  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  // Essayer le fond IA, sinon utiliser le fond local.
+  const aiBackground = await generateAiBackground(item);
 
-  gradient.addColorStop(0, "#101326");
-  gradient.addColorStop(0.5, "#302047");
-  gradient.addColorStop(1, "#071d2b");
+  if (aiBackground) {
+    ctx.drawImage(aiBackground, 0, 0, width, height);
 
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "rgba(5, 8, 24, 0.42)";
+    ctx.fillRect(0, 0, width, height);
+  } else {
+    const gradient = ctx.createLinearGradient(0, 0, width, height);
+
+    gradient.addColorStop(0, "#101326");
+    gradient.addColorStop(0.5, "#302047");
+    gradient.addColorStop(1, "#071d2b");
+
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+  }
 
   // Cercles décoratifs
   ctx.globalAlpha = 0.18;
@@ -197,9 +311,10 @@ async function createImage(item, outputPath, style) {
 
   ctx.globalAlpha = 1;
 
-  // Étoiles décoratives
+  // Étoiles
   for (let i = 0; i < 65; i++) {
     ctx.beginPath();
+
     ctx.arc(
       (i * 137) % width,
       (i * 263) % height,
@@ -231,7 +346,7 @@ async function createImage(item, outputPath, style) {
     850
   );
 
-  // Personnage ou signature de la citation
+  // Personnage
   ctx.fillStyle = style.color;
   ctx.shadowColor = style.shadow;
   ctx.shadowBlur = 12;
@@ -258,7 +373,9 @@ async function createImage(item, outputPath, style) {
 
     lines = wrapText(ctx, quote, 820);
 
-    if (lines.length <= 10) break;
+    if (lines.length <= 10) {
+      break;
+    }
 
     fontSize -= 4;
   }
@@ -314,7 +431,10 @@ function makeCaption(item) {
     ? "#AnimeQuotes #AnimeMotivation #AnimeEdit #Mindset #FYP"
     : "#CitationAnime #Motivation #Anime #Mentalite #FYP";
 
-  return `${item.character ? item.character + " • " : ""}${item.anime || "Anime"}\n${quote}\n\n${hashtags}`;
+  return (
+    `${item.character ? item.character + " • " : ""}` +
+    `${item.anime || "Anime"}\n${quote}\n\n${hashtags}`
+  );
 }
 
 // ======================================
@@ -326,8 +446,6 @@ async function generatePost() {
 
   const quotes = loadQuotes();
   const item = chooseQuote(quotes);
-
-  // Le style choisi est transmis à la création de l'image
   const style = chooseFontStyle();
 
   const stamp = new Date()
@@ -343,13 +461,14 @@ async function generatePost() {
     createdAt: new Date().toISOString(),
     quoteId: item.id ?? null,
     fontStyle: style.name,
+    aiBackgroundEnabled: HF_ENABLED,
     character: item.character ?? null,
     anime: item.anime ?? null,
     quote: item.quote,
     caption: makeCaption(item),
     image: imageName,
     requestedLocation: "New York, NY, USA",
-    note: "Choisir New York manuellement dans TikTok si cette option est disponible."
+    note: "La localisation doit être choisie manuellement dans TikTok si disponible."
   };
 
   const metadataPath = imagePath.replace(/\.png$/, ".json");
@@ -362,10 +481,9 @@ async function generatePost() {
 
   console.log("==================================");
   console.log(`🖼️ Image créée : ${imageName}`);
-  console.log(`🎨 Style choisi : ${style.name}`);
+  console.log(`🎨 Style : ${style.name}`);
   console.log(`📝 Citation : ${item.quote}`);
   console.log(`📄 Légende : ${metadata.caption}`);
-  console.log("📍 Localisation : New York à sélectionner manuellement.");
   console.log("==================================");
 }
 
@@ -377,7 +495,7 @@ async function safeGenerate() {
   try {
     await generatePost();
   } catch (error) {
-    console.error("❌ Erreur :", error.message);
+    console.error("❌ Erreur de génération :", error.message);
   }
 }
 
@@ -391,11 +509,16 @@ async function main() {
   console.log("🎌 BOT ANIME TIKTOK DÉMARRÉ");
   console.log(`🕒 Fuseau horaire : ${TIMEZONE}`);
   console.log(`🎨 Styles disponibles : ${FONT_STYLES.length}`);
+  console.log(`🧠 Génération IA : ${HF_ENABLED ? "activée" : "désactivée"}`);
 
-  // Première génération immédiate
+  if (HF_ENABLED && !HF_TOKEN) {
+    console.log("⚠️ HF_IMAGE_ENABLED est actif, mais HF_TOKEN est absent.");
+  }
+
+  // Première génération au démarrage
   await safeGenerate();
 
-  // Générations automatiques
+  // Programmation automatique
   cron.schedule("0 1 * * *", safeGenerate, {
     timezone: TIMEZONE
   });
@@ -408,8 +531,8 @@ async function main() {
     timezone: TIMEZONE
   });
 
-  console.log("✅ Programmation : 01 h, 13 h et 19 h.");
-  console.log("ℹ️ Le bot crée des images, mais ne publie pas sur TikTok.");
+  console.log("✅ Générations programmées : 01 h, 13 h et 19 h.");
+  console.log("ℹ️ Le bot crée les images et les légendes, mais ne publie pas sur TikTok.");
 }
 
 main();
