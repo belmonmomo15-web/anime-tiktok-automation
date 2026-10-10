@@ -4,8 +4,10 @@ const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
 const axios = require("axios");
+const express = require("express");
 const { createCanvas, loadImage } = require("canvas");
 const { recommendMusic } = require("./music-recommender");
+const setupTikTokOAuth = require("./oauth-server");
 
 // ======================================
 // CONFIGURATION
@@ -13,6 +15,8 @@ const { recommendMusic } = require("./music-recommender");
 
 const TIMEZONE = process.env.TIMEZONE || "Africa/Douala";
 const OUTPUT_DIR = path.join(__dirname, "output");
+
+const PORT = Number(process.env.PORT) || 3000;
 
 const HF_ENABLED =
   String(process.env.HF_IMAGE_ENABLED || "false").toLowerCase() === "true";
@@ -116,7 +120,6 @@ function chooseQuote(quotes) {
   );
 
   const pool = options.length > 0 ? options : quotes;
-
   const item = pool[Math.floor(Math.random() * pool.length)];
 
   fs.writeFileSync(
@@ -141,12 +144,8 @@ function chooseFontStyle() {
     last = fs.readFileSync(historyPath, "utf8").trim();
   } catch (_) {}
 
-  const options = FONT_STYLES.filter(
-    style => style.name !== last
-  );
-
+  const options = FONT_STYLES.filter(style => style.name !== last);
   const pool = options.length > 0 ? options : FONT_STYLES;
-
   const style = pool[Math.floor(Math.random() * pool.length)];
 
   fs.writeFileSync(historyPath, style.name, "utf8");
@@ -159,12 +158,11 @@ function chooseFontStyle() {
 // ======================================
 
 async function generateAiBackground(item) {
-  if (!HF_ENABLED) {
-    return null;
-  }
+  if (!HF_ENABLED || !HF_TOKEN) {
+    if (HF_ENABLED && !HF_TOKEN) {
+      console.log("ℹ️ HF_TOKEN absent : fond graphique local utilisé.");
+    }
 
-  if (!HF_TOKEN) {
-    console.log("ℹ️ HF_TOKEN absent : fond graphique local utilisé.");
     return null;
   }
 
@@ -174,9 +172,7 @@ async function generateAiBackground(item) {
 
   const prompt = [
     "Vertical 9:16 cinematic anime-inspired illustration.",
-    subject
-      ? "Visual inspiration: " + subject + "."
-      : "Original fantasy anime scenery.",
+    subject ? `Visual inspiration: ${subject}.` : "Original fantasy anime scenery.",
     "Beautiful detailed anime art, dramatic cinematic lighting,",
     "deep blue and violet colors with subtle cyan highlights,",
     "atmospheric depth, professional digital illustration.",
@@ -211,7 +207,7 @@ async function generateAiBackground(item) {
 
     const buffer = Buffer.from(response.data);
 
-    if (buffer.length === 0) {
+    if (!buffer.length) {
       throw new Error("L'image reçue est vide.");
     }
 
@@ -220,7 +216,6 @@ async function generateAiBackground(item) {
     console.log("✅ Fond IA reçu.");
 
     return image;
-
   } catch (error) {
     const status = error.response?.status;
 
@@ -233,7 +228,7 @@ async function generateAiBackground(item) {
     if (status === 401 || status === 403) {
       console.error("Vérifie les permissions du token Hugging Face.");
     } else if (status === 402 || status === 429) {
-      console.error("Vérifie les crédits disponibles et les limites d'utilisation.");
+      console.error("Vérifie les crédits et les limites d'utilisation.");
     } else if (status === 503) {
       console.error("Le modèle est peut-être en cours de chargement.");
     }
@@ -284,7 +279,6 @@ async function createImage(item, outputPath, style) {
 
   if (aiBackground) {
     ctx.drawImage(aiBackground, 0, 0, width, height);
-
     ctx.fillStyle = "rgba(5, 8, 24, 0.42)";
     ctx.fillRect(0, 0, width, height);
   } else {
@@ -314,15 +308,7 @@ async function createImage(item, outputPath, style) {
   // Étoiles
   for (let i = 0; i < 65; i++) {
     ctx.beginPath();
-
-    ctx.arc(
-      (i * 137) % width,
-      (i * 263) % height,
-      (i % 3) + 2,
-      0,
-      Math.PI * 2
-    );
-
+    ctx.arc((i * 137) % width, (i * 263) % height, (i % 3) + 2, 0, Math.PI * 2);
     ctx.fillStyle = "#ffffff";
     ctx.fill();
   }
@@ -350,9 +336,7 @@ async function createImage(item, outputPath, style) {
   ctx.fillStyle = style.color;
   ctx.shadowColor = style.shadow;
   ctx.shadowBlur = 12;
-
-  ctx.font =
-    `${style.italic ? "italic " : ""}${style.weight} 46px ${style.family}`;
+  ctx.font = `${style.italic ? "italic " : ""}${style.weight} 46px ${style.family}`;
 
   ctx.fillText(
     String(item.character || "ANIME MINDSET"),
@@ -368,9 +352,7 @@ async function createImage(item, outputPath, style) {
   let lines = [];
 
   while (fontSize >= 34) {
-    ctx.font =
-      `${style.italic ? "italic " : ""}${style.weight} ${fontSize}px ${style.family}`;
-
+    ctx.font = `${style.italic ? "italic " : ""}${style.weight} ${fontSize}px ${style.family}`;
     lines = wrapText(ctx, quote, 820);
 
     if (lines.length <= 10) {
@@ -380,9 +362,7 @@ async function createImage(item, outputPath, style) {
     fontSize -= 4;
   }
 
-  ctx.font =
-    `${style.italic ? "italic " : ""}${style.weight} ${fontSize}px ${style.family}`;
-
+  ctx.font = `${style.italic ? "italic " : ""}${style.weight} ${fontSize}px ${style.family}`;
   ctx.fillStyle = style.color;
   ctx.shadowColor = style.shadow;
   ctx.shadowBlur = 12;
@@ -410,10 +390,7 @@ async function createImage(item, outputPath, style) {
   ctx.font = "bold 28px sans-serif";
   ctx.fillText("@ANIME_QUOTES", width / 2, 1735);
 
-  await fs.promises.writeFile(
-    outputPath,
-    canvas.toBuffer("image/png")
-  );
+  await fs.promises.writeFile(outputPath, canvas.toBuffer("image/png"));
 }
 
 // ======================================
@@ -438,7 +415,7 @@ function makeCaption(item) {
 }
 
 // ======================================
-// RECOMMANDATION MUSICALE SÉCURISÉE
+// RECOMMANDATION MUSICALE
 // ======================================
 
 function getMusicRecommendation(item) {
@@ -446,7 +423,7 @@ function getMusicRecommendation(item) {
     const result = recommendMusic(item);
 
     if (!result || typeof result !== "object") {
-      throw new Error("Le moteur musical n'a pas retourné de résultat valide.");
+      throw new Error("Résultat musical invalide.");
     }
 
     return {
@@ -458,12 +435,8 @@ function getMusicRecommendation(item) {
         : [],
       reason: result.reason || "Suggestion basée sur la citation."
     };
-
   } catch (error) {
-    console.error(
-      "⚠️ Recommandation musicale indisponible :",
-      error.message
-    );
+    console.error("⚠️ Recommandation musicale indisponible :", error.message);
 
     return {
       style: "Instrumental anime",
@@ -472,7 +445,7 @@ function getMusicRecommendation(item) {
         `${item.anime || "anime"} instrumental soundtrack`,
         "anime emotional instrumental music"
       ],
-      reason: "Suggestion de secours : le moteur musical n'a pas pu analyser la citation."
+      reason: "Suggestion de secours."
     };
   }
 }
@@ -487,14 +460,9 @@ async function generatePost() {
   const quotes = loadQuotes();
   const item = chooseQuote(quotes);
   const style = chooseFontStyle();
-
-  // Analyser la citation pour recommander une musique.
   const music = getMusicRecommendation(item);
 
-  const stamp = new Date()
-    .toISOString()
-    .replace(/[:.]/g, "-");
-
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const imageName = `anime-quote-${stamp}.png`;
   const imagePath = path.join(OUTPUT_DIR, imageName);
 
@@ -510,26 +478,21 @@ async function generatePost() {
     quote: item.quote,
     caption: makeCaption(item),
     image: imageName,
-
-    // Recommandation musicale
     musicRecommendation: music,
     musicStyle: music.style,
     musicEmotion: music.emotion,
     musicSearchSuggestions: music.searchSuggestions,
     musicReason: music.reason,
-
-    // La localisation reste manuelle.
     requestedLocation: null,
-
     note:
       "La musique est une recommandation uniquement. " +
-      "Vérifie la disponibilité du morceau et les droits d'utilisation dans TikTok. " +
-      "Le bot ne télécharge pas de musique et ne publie pas automatiquement."
+      "Vérifie les droits d'utilisation. " +
+      "La publication TikTok automatique n'est pas encore activée."
   };
 
   const metadataPath = imagePath.replace(/\.png$/, ".json");
 
-  fs.writeFileSync(
+  await fs.promises.writeFile(
     metadataPath,
     JSON.stringify(metadata, null, 2),
     "utf8"
@@ -543,11 +506,8 @@ async function generatePost() {
   console.log(`📝 Citation : ${item.quote}`);
   console.log(`📄 Légende : ${metadata.caption}`);
   console.log(`🎵 Style musical : ${music.style}`);
-  console.log(`🧠 Émotion détectée : ${music.emotion}`);
-  console.log(
-    `🔎 Recherches musicales : ${music.searchSuggestions.join(" | ")}`
-  );
-  console.log(`💡 Justification : ${music.reason}`);
+  console.log(`🧠 Émotion : ${music.emotion}`);
+  console.log(`🔎 Recherches : ${music.searchSuggestions.join(" | ")}`);
   console.log("==================================");
 }
 
@@ -564,6 +524,45 @@ async function safeGenerate() {
 }
 
 // ======================================
+// SERVEUR WEB ET CONNEXION TIKTOK
+// ======================================
+
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Anime TikTok Automation</title>
+    </head>
+    <body style="font-family:Arial,sans-serif;max-width:700px;margin:40px auto;padding:20px">
+      <h1>Anime TikTok Automation</h1>
+      <p>Le serveur fonctionne.</p>
+      <p><a href="/auth/tiktok">Connecter mon compte TikTok</a></p>
+    </body>
+    </html>
+  `);
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "anime-tiktok-automation",
+    time: new Date().toISOString()
+  });
+});
+
+// Enregistre les routes définies dans oauth-server.js.
+setupTikTokOAuth(app);
+
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌐 Serveur web actif sur le port ${PORT}`);
+});
+
+// ======================================
 // DÉMARRAGE ET PROGRAMMATION
 // ======================================
 
@@ -573,42 +572,40 @@ async function main() {
   console.log("🎌 BOT ANIME TIKTOK DÉMARRÉ");
   console.log(`🕒 Fuseau horaire : ${TIMEZONE}`);
   console.log(`🎨 Styles disponibles : ${FONT_STYLES.length}`);
-  console.log(
-    `🧠 Génération IA : ${HF_ENABLED ? "activée" : "désactivée"}`
-  );
+  console.log(`🧠 Génération IA : ${HF_ENABLED ? "activée" : "désactivée"}`);
 
   if (HF_ENABLED && !HF_TOKEN) {
-    console.log(
-      "⚠️ HF_IMAGE_ENABLED est actif, mais HF_TOKEN est absent."
-    );
+    console.log("⚠️ HF_IMAGE_ENABLED est actif, mais HF_TOKEN est absent.");
   }
 
-  // Première génération au démarrage
   await safeGenerate();
 
-  // Génération automatique à 01 h
-  cron.schedule("0 1 * * *", safeGenerate, {
-    timezone: TIMEZONE
-  });
+  cron.schedule("0 1 * * *", safeGenerate, { timezone: TIMEZONE });
+  cron.schedule("0 13 * * *", safeGenerate, { timezone: TIMEZONE });
+  cron.schedule("0 19 * * *", safeGenerate, { timezone: TIMEZONE });
 
-  // Génération automatique à 13 h
-  cron.schedule("0 13 * * *", safeGenerate, {
-    timezone: TIMEZONE
-  });
-
-  // Génération automatique à 19 h
-  cron.schedule("0 19 * * *", safeGenerate, {
-    timezone: TIMEZONE
-  });
-
-  console.log(
-    "✅ Générations programmées : 01 h, 13 h et 19 h."
-  );
-
-  console.log(
-    "ℹ️ Le bot génère des images, des légendes et des recommandations musicales. " +
-    "Il ne publie pas automatiquement sur TikTok."
-  );
+  console.log("✅ Générations programmées : 01 h, 13 h et 19 h.");
+  console.log("ℹ️ La publication TikTok automatique n'est pas encore activée.");
 }
 
-main();
+main().catch(error => {
+  console.error("❌ Erreur au démarrage :", error.message);
+});
+
+// ======================================
+// ARRÊT PROPRE
+// ======================================
+
+async function shutdown(signal) {
+  console.log(`Arrêt demandé (${signal}).`);
+
+  server.close(() => {
+    console.log("Serveur web arrêté.");
+    process.exit(0);
+  });
+
+  setTimeout(() => process.exit(1), 10000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
