@@ -5,6 +5,7 @@ const path = require("path");
 const cron = require("node-cron");
 const axios = require("axios");
 const { createCanvas, loadImage } = require("canvas");
+const { recommendMusic } = require("./music-recommender");
 
 // ======================================
 // CONFIGURATION
@@ -53,7 +54,7 @@ const FONT_STYLES = [
   { name: "Editorial", family: "serif", weight: "bold", italic: false, color: "#ffffff", shadow: "#333333" },
   { name: "Arcade", family: "monospace", weight: "bold", italic: false, color: "#f9ff91", shadow: "#653bff" },
   { name: "Romantique", family: "serif", weight: "normal", italic: true, color: "#ffd8e8", shadow: "#7a204a" },
-  { name: "Militaire", family: "sans-serif", weight: "bold", italic: false, color: "#e4e9c7", shadow: "#333d20" },
+  { name: "Militaire", family: "sans-serif", weight: "bold", italic: true, color: "#e4e9c7", shadow: "#333d20" },
   { name: "Cyberpunk", family: "monospace", weight: "bold", italic: true, color: "#ffb6e6", shadow: "#00e5ff" },
   { name: "Classique blanc", family: "serif", weight: "bold", italic: false, color: "#ffffff", shadow: "#000000" },
   { name: "Énergie", family: "sans-serif", weight: "bold", italic: true, color: "#ffefdc", shadow: "#ff5a00" }
@@ -128,7 +129,7 @@ function chooseQuote(quotes) {
 }
 
 // ======================================
-// CHOIX DU STYLE
+// CHOIX DU STYLE TYPOGRAPHIQUE
 // ======================================
 
 function chooseFontStyle() {
@@ -279,7 +280,6 @@ async function createImage(item, outputPath, style) {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
 
-  // Essayer le fond IA, sinon utiliser le fond local.
   const aiBackground = await generateAiBackground(item);
 
   if (aiBackground) {
@@ -438,6 +438,46 @@ function makeCaption(item) {
 }
 
 // ======================================
+// RECOMMANDATION MUSICALE SÉCURISÉE
+// ======================================
+
+function getMusicRecommendation(item) {
+  try {
+    const result = recommendMusic(item);
+
+    if (!result || typeof result !== "object") {
+      throw new Error("Le moteur musical n'a pas retourné de résultat valide.");
+    }
+
+    return {
+      ...result,
+      style: result.style || "Instrumental adapté à l'émotion",
+      emotion: result.emotion || "Émotion générale",
+      searchSuggestions: Array.isArray(result.searchSuggestions)
+        ? result.searchSuggestions
+        : [],
+      reason: result.reason || "Suggestion basée sur la citation."
+    };
+
+  } catch (error) {
+    console.error(
+      "⚠️ Recommandation musicale indisponible :",
+      error.message
+    );
+
+    return {
+      style: "Instrumental anime",
+      emotion: "Inconnue",
+      searchSuggestions: [
+        `${item.anime || "anime"} instrumental soundtrack`,
+        "anime emotional instrumental music"
+      ],
+      reason: "Suggestion de secours : le moteur musical n'a pas pu analyser la citation."
+    };
+  }
+}
+
+// ======================================
 // GÉNÉRATION D'UNE PUBLICATION
 // ======================================
 
@@ -447,6 +487,9 @@ async function generatePost() {
   const quotes = loadQuotes();
   const item = chooseQuote(quotes);
   const style = chooseFontStyle();
+
+  // Analyser la citation pour recommander une musique.
+  const music = getMusicRecommendation(item);
 
   const stamp = new Date()
     .toISOString()
@@ -467,8 +510,21 @@ async function generatePost() {
     quote: item.quote,
     caption: makeCaption(item),
     image: imageName,
-    requestedLocation: "New York, NY, USA",
-    note: "La localisation doit être choisie manuellement dans TikTok si disponible."
+
+    // Recommandation musicale
+    musicRecommendation: music,
+    musicStyle: music.style,
+    musicEmotion: music.emotion,
+    musicSearchSuggestions: music.searchSuggestions,
+    musicReason: music.reason,
+
+    // La localisation reste manuelle.
+    requestedLocation: null,
+
+    note:
+      "La musique est une recommandation uniquement. " +
+      "Vérifie la disponibilité du morceau et les droits d'utilisation dans TikTok. " +
+      "Le bot ne télécharge pas de musique et ne publie pas automatiquement."
   };
 
   const metadataPath = imagePath.replace(/\.png$/, ".json");
@@ -481,9 +537,17 @@ async function generatePost() {
 
   console.log("==================================");
   console.log(`🖼️ Image créée : ${imageName}`);
-  console.log(`🎨 Style : ${style.name}`);
+  console.log(`🎨 Style graphique : ${style.name}`);
+  console.log(`🎭 Anime : ${item.anime || "Non précisé"}`);
+  console.log(`👤 Personnage : ${item.character || "Non précisé"}`);
   console.log(`📝 Citation : ${item.quote}`);
   console.log(`📄 Légende : ${metadata.caption}`);
+  console.log(`🎵 Style musical : ${music.style}`);
+  console.log(`🧠 Émotion détectée : ${music.emotion}`);
+  console.log(
+    `🔎 Recherches musicales : ${music.searchSuggestions.join(" | ")}`
+  );
+  console.log(`💡 Justification : ${music.reason}`);
   console.log("==================================");
 }
 
@@ -509,30 +573,42 @@ async function main() {
   console.log("🎌 BOT ANIME TIKTOK DÉMARRÉ");
   console.log(`🕒 Fuseau horaire : ${TIMEZONE}`);
   console.log(`🎨 Styles disponibles : ${FONT_STYLES.length}`);
-  console.log(`🧠 Génération IA : ${HF_ENABLED ? "activée" : "désactivée"}`);
+  console.log(
+    `🧠 Génération IA : ${HF_ENABLED ? "activée" : "désactivée"}`
+  );
 
   if (HF_ENABLED && !HF_TOKEN) {
-    console.log("⚠️ HF_IMAGE_ENABLED est actif, mais HF_TOKEN est absent.");
+    console.log(
+      "⚠️ HF_IMAGE_ENABLED est actif, mais HF_TOKEN est absent."
+    );
   }
 
   // Première génération au démarrage
   await safeGenerate();
 
-  // Programmation automatique
+  // Génération automatique à 01 h
   cron.schedule("0 1 * * *", safeGenerate, {
     timezone: TIMEZONE
   });
 
+  // Génération automatique à 13 h
   cron.schedule("0 13 * * *", safeGenerate, {
     timezone: TIMEZONE
   });
 
+  // Génération automatique à 19 h
   cron.schedule("0 19 * * *", safeGenerate, {
     timezone: TIMEZONE
   });
 
-  console.log("✅ Générations programmées : 01 h, 13 h et 19 h.");
-  console.log("ℹ️ Le bot crée les images et les légendes, mais ne publie pas sur TikTok.");
+  console.log(
+    "✅ Générations programmées : 01 h, 13 h et 19 h."
+  );
+
+  console.log(
+    "ℹ️ Le bot génère des images, des légendes et des recommandations musicales. " +
+    "Il ne publie pas automatiquement sur TikTok."
+  );
 }
 
 main();
